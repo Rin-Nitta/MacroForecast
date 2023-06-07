@@ -1,0 +1,591 @@
+# 必要なライブラリをインストール
+!pip install -U statsmodels
+!pip install japanize_matplotlib
+
+import numpy as np
+import pandas as pd
+import keras.initializers as initializers
+from keras.layers import Conv1D, Dense, Dropout, Flatten, MaxPooling1D
+from tensorflow.keras.layers import LSTM
+from keras.models import Sequential
+
+from sklearn import ensemble, linear_model, svm, tree
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+# Colabでファイルを読み込むために、Google Driveをマウント
+from google.colab import drive
+drive.mount('/content/drive')
+
+#####
+from matplotlib import pyplot as plt
+from matplotlib.pylab import rcParams
+rcParams["figure.figsize"] = 15, 6
+import japanize_matplotlib
+
+# data_researchのデータを増加率にする関数
+def Adjust_data(data, info, start="1974", freq=["M", "Q"]):
+    """
+    data:データを渡す（形式はdata_researchのシートを読み込み期間の部分をindexにしたデータフレーム）
+    info:"データ確認用"シートを渡す
+    strat:データの期間の初め（デフォルトはdata_researchに合わせて"1974"）
+    freq:月次か四半期か（今後増やす可能性あり。"D"など）
+    """
+    dlen = len(data)
+    dti = pd.date_range(start, periods=dlen, freq=freq)
+    datalist = data.columns  # データの番号のリスト
+    df = pd.DataFrame(index=dti) # 計算後の値を格納する
+    for number in datalist:
+        target, tag = Get_tag(data, info, number)
+        if info.loc[number, "データ概要"] == "%" or info.loc[number, "データ概要"] == "％":
+            # ％のデータの場合は前期比・前年同期比を計算せず返す
+            rate = target
+        else:
+            # ％のデータでない場合は前期比・前年同期比を計算
+            rate = Calculate_rate_of_change(target, tag, freq)
+        df_temp = pd.DataFrame(rate, columns=[number])
+        df_temp.index = dti # 上でindex=dtiとすると何故か値が全てNanになる不具合があったので後から指定
+        df = pd.merge(df, df_temp, left_index=True, right_index=True)
+    return df
+
+# ある変数の値とタグを取得
+def Get_tag(data, info, number): # 全データからある番号のデータを抽出（番号はデータファイルを参照）
+    target = data.loc[:, number]
+    tag = info.loc[number, "季節調整（SA）原系列（OR）"]
+    return target, tag
+
+# データを増加率％に変換する
+def Calculate_rate_of_change(target, tag, freq=["M", "Q"]):
+    rate = []
+    # 頻度で場合わけして計算
+    # 前年同期比が何期前かを取得
+    if freq == "M": # 月次データの場合
+        yoy = 12
+    elif freq == "Q": # 四半期データの場合
+        yoy = 4
+    else:
+        return "no frequency"
+    # 増加率の計算
+    # 季節調整済みは前期比、原系列は前年同期比
+    if tag == "SA":
+        for i in range(len(target)):
+            if i<1 or target.iloc[i] is None or target.iloc[i-1] is None: # 一期前または今期のデータがない場合
+                rate.append(np.nan)
+            else:
+                rate.append((target.iloc[i]-target.iloc[i-1])/target.iloc[i-1]*100)
+    elif tag == "OR":
+        for i in range(len(target)):
+            if i<yoy or target.iloc[i] is None or target.iloc[i-1] is None:
+                rate.append(np.nan)
+            else:
+                rate.append((target.iloc[i]-target.iloc[i-yoy])/target.iloc[i-yoy]*100)
+    else:
+        for i in range(len(target)):
+            rate.append(np.nan)
+    return rate
+
+# 月次データを四半期に変換（単純平均）
+def M_to_q(file, start="1974"):
+    data = file.iloc[:, 1:]
+    # dtiを取得して四半期区分に変換
+    dlen = len(data)
+    dti_q = pd.date_range(start, periods=dlen/3, freq="Q")
+    datalist = data.columns
+    df = pd.DataFrame(index=dti_q)
+    #　個々のデータの計算
+    for number in datalist: # データの数だけ繰り返す
+        target, tag = Get_tag(data, info, number)
+        # 四半期に変換
+        target_q = []
+        for j in range(2, len(target), 3):
+            # データ３個ごとに計算
+            target_q.append(np.average(target[j-2 : j+1]))
+        # データフレームにして返す
+        df_temp = pd.DataFrame(target_q, columns=[number])
+        df_temp.index = dti_q
+        df = pd.merge(df, df_temp, left_index=True, right_index=True)
+    return df
+
+# ファイルの読み込み
+# データの場所は各自で変更
+file_m = pd.read_excel("/content/drive/Shareddrives/新谷ゼミ/data/data_research.xlsx", sheet_name="data", index_col=0)
+file_q = pd.read_excel("/content/drive/Shareddrives/新谷ゼミ/data/data_research.xlsx", sheet_name="data_q", index_col=0)
+info = pd.read_excel("/content/drive/Shareddrives/新谷ゼミ/data/data_research.xlsx", sheet_name="データ確認用")
+# indexをdtiにしたデータフレームを作成
+df_m, df_q = file_m, file_q
+df_m.index = pd.date_range("1974", periods=len(df_m), freq="M")
+df_q.index = pd.date_range("1974", periods=len(df_q), freq="Q")
+
+# 月次データを四半期データに変換
+df_mq = M_to_q(file_m)
+# 増加率を計算
+rdf_m = Adjust_data(df_m, info, "1974", freq="M")
+rdf_q = Adjust_data(df_q, info, "1974", freq="Q")
+rdf_mq = Adjust_data(df_mq, info, "1974", freq="Q")
+
+# データの期間を指定（2001年初め〜2022年6月）
+data_m = rdf_m.loc["2001-01":"2022-06"]
+data_q = rdf_q.loc["2001-01":"2022-06"]
+data_mq = rdf_mq.loc["2001-01":"2022-06"]
+# 指定した期間で欠損値があるデータを除外
+data_m = data_m.dropna(axis=1)
+data_q = data_q.dropna(axis=1)
+data_mq = data_mq.dropna(axis=1)
+
+# 四半期データ二つを合成
+com_data_q = pd.merge(data_mq, data_q, left_index=True, right_index=True)
+com_data_q= com_data_q.sort_index(axis=1)
+com_data_q
+
+dlen = len(com_data_q)
+dti = pd.date_range("2001-03-31", periods=dlen, freq="QS")
+
+from functools import partial
+
+# 番号（data_researchのデータ確認用シート参照）に対応するデータとデータ名を返す
+def Extract_data(number, info, data):
+    if number in data.columns:
+        target = data.loc[:, number]
+        name = info.loc[number, "データ名"]
+        return target, name
+
+# 番号に応じてデータをプロット
+def Plot_data(number, info, data):
+    if number in data.columns:
+        target = data.loc[:, number]
+        name = info.loc[number, "データ名"]
+        tag = info.loc[number, "季節調整（SA）原系列（OR）"]
+        if info.loc[number, "データ概要"] == "%" or info.loc[number, "データ概要"] == "％":
+            unit = "%"
+        elif tag == "SA":
+            unit = "前期比増加率（%）"
+        else:
+            unit = "前年同期比増加率（%）"
+        dti = target.index
+        plt.plot(dti, target, label=str(name))
+        if unit != "%":
+            plt.hlines([0], dti[0], dti[-1], color="black", linestyles='dashed')
+        plt.legend(loc="upper right", fontsize=16)
+        plt.tick_params(labelsize=16)
+        plt.xlim(dti[0], dti[-1])
+        plt.ylabel(str(unit), fontsize=16)
+    else:
+        return "no data"
+
+# 入力するデータをcom_data_qに固定した関数を作成
+Extract_comdata = partial(Extract_data, info=info, data=com_data_q)
+Plot_comdata = partial(Plot_data, info=info, data=com_data_q)
+
+number = 0
+target, name = Extract_comdata(number)
+print(name)
+
+#説明変数と被説明変数の作成
+
+data_y = pd.DataFrame(com_data_q[0.0])
+data_x = pd.DataFrame(com_data_q)
+vsample, hsample = len(data_x), len(data_x.columns)
+
+
+# AR(1)モデルのサンプル外予測
+
+from sklearn.linear_model import LinearRegression
+
+PERIOD = 68  # 訓練データのサンプルサイズ
+H = 1  # 予測期間（1四半期）
+L = 1  # ARモデルのラグ次数（1四半期）
+
+
+data_y_AR = data_y 
+data_x_AR = data_y 
+nsample = len(data_x_AR)
+
+
+def train_and_predict_ar_model(train_x, train_y, test_x, test_y):
+    model = LinearRegression()
+    model.fit(train_x, train_y)
+    forecast = model.predict(test_x)
+    sqe = ((test_y - forecast) ** 2).sum(axis=0)
+    return forecast, sqe
+
+
+# 固定ウィンドウ
+predict_result1_list, sqe_result1_list = [], []
+predict_result1 = np.zeros((nsample - H) - PERIOD - (L - 1))
+sqe_result1 = np.zeros((nsample - H) - PERIOD - (L - 1))
+for i in range(0, (nsample - H) - PERIOD - (L - 1), 1):
+    train_x = pd.DataFrame()
+    test_x = pd.DataFrame()
+    for ll in range(1, L + 1, 1):
+        # 訓練データの指定
+        train_x_lagged = pd.DataFrame(
+            np.ravel(
+                (data_x_AR[L - ll : L - ll + PERIOD]).to_numpy()
+            )
+        )
+        train_x = pd.concat([train_x, train_x_lagged], axis=1)
+        train_y = data_y_AR[0 + H + (L - 1) : 0 + H + PERIOD + (L - 1)]
+        # テストデータの指定
+        test_x_lagged = pd.DataFrame(
+            np.ravel(
+                (
+                    data_x_AR[i + L - ll + PERIOD : i + L - ll + PERIOD + 1]
+                ).to_numpy()
+            )
+        )
+        test_x = pd.concat([test_x, test_x_lagged], axis=1)
+        test_y = data_y_AR[
+            i + H + PERIOD + (L - 1) : i + H + PERIOD + (L - 1) + 1
+        ]
+    predict_result1[i], sqe_result1[i] = train_and_predict_ar_model(
+        train_x, train_y, test_x, test_y
+    )
+predict_result1_list.append(predict_result1)
+sqe_result1_list.append(sqe_result1)
+
+
+# 拡大ウィンドウ
+predict_result2_list, sqe_result2_list = [], []
+predict_result2 = np.zeros((nsample - H) - PERIOD - (L - 1))
+sqe_result2 = np.zeros((nsample - H) - PERIOD - (L - 1))
+for i in range(0, (nsample - H) - PERIOD - (L - 1), 1):
+    train_x = pd.DataFrame()
+    test_x = pd.DataFrame()
+    for ll in range(1, L + 1, 1):
+        # 訓練データの指定
+        train_x_lagged = pd.DataFrame(
+            np.ravel(
+                (
+                    data_x_AR[L - ll : i + L - ll + PERIOD]
+                ).to_numpy()
+            )
+        )
+        train_x = pd.concat([train_x, train_x_lagged], axis=1)
+        train_y = data_y_AR[0 + H + (L - 1) : i + H + PERIOD + (L - 1)]
+        # テストデータの指定
+        test_x_lagged = pd.DataFrame(
+            np.ravel(
+                (
+                    data_x_AR[i + L - ll + PERIOD : i + L - ll + PERIOD + 1]
+                ).to_numpy()
+            )
+        )
+        test_x = pd.concat([test_x, test_x_lagged], axis=1)
+        test_y = data_y_AR[
+            i + H + PERIOD + (L - 1) : i + H + PERIOD + (L - 1) + 1
+        ]
+    predict_result2[i], sqe_result2[i] = train_and_predict_ar_model(
+        train_x, train_y, test_x, test_y
+    )
+predict_result2_list.append(predict_result2)
+sqe_result2_list.append(sqe_result2)
+
+
+# ローリングウィンドウ
+predict_result3_list, sqe_result3_list = [], []
+predict_result3 = np.zeros((nsample - H) - PERIOD - (L - 1))
+sqe_result3 = np.zeros((nsample - H) - PERIOD - (L - 1))
+for i in range(0, (nsample - H) - PERIOD - (L - 1), 1):
+    train_x = pd.DataFrame()
+    test_x = pd.DataFrame()
+    for ll in range(1, L + 1, 1):
+        # 訓練データの指定
+        train_x_lagged = pd.DataFrame(
+            np.ravel(
+                (
+                    data_x_AR[i + L - ll : i + L - ll + PERIOD]
+                ).to_numpy()
+            )
+        )
+        train_x = pd.concat([train_x, train_x_lagged], axis=1)
+        train_y = data_y_AR[i + H + (L - 1) : i + H + PERIOD + (L - 1)]
+        # テストデータの指定
+        test_x_lagged = pd.DataFrame(
+            np.ravel(
+                (
+                    data_x_AR[i + L - ll + PERIOD : i + L - ll + PERIOD + 1]
+                ).to_numpy()
+            )
+        )
+        test_x = pd.concat([test_x, test_x_lagged], axis=1)
+        test_y = data_y_AR[
+            i + H + PERIOD + (L - 1) : i + H + PERIOD + (L - 1) + 1
+        ]
+    predict_result3[i], sqe_result3[i] = train_and_predict_ar_model(
+        train_x, train_y, test_x, test_y
+    )
+predict_result3_list.append(predict_result3)
+sqe_result3_list.append(sqe_result3)
+
+MSFE = [] 
+index = ['固定ウィンドウ','拡大ウィンドウ','ローリングウィンドウ']
+MSFE.append(np.ravel(sqe_result1_list).mean())
+MSFE.append(np.ravel(sqe_result2_list).mean())
+MSFE.append(np.ravel(sqe_result3_list).mean())
+pd.DataFrame(MSFE,index = index, columns = ['MSFE'])
+
+
+#ランダムウォーク（予測値として今期の値を用いるモデル）
+#サンプル外予測
+PERIOD = 68
+H = 1
+
+data_list=data_y.values.tolist()
+data_list = sum(data_list, [])
+rlen = len(data_list)
+list_SEBOX_rand = []
+
+for i in range(rlen - PERIOD - H):
+    
+    SE_rand = (data_list[i + PERIOD + H] - data_list[i + PERIOD])**2
+
+     
+    list_SEBOX_rand.append(SE_rand)
+MSFE = np.average(list_SEBOX_rand)
+print("ランダムウォークでの平均２乗誤差:",MSFE)
+
+#累積2乗予測誤差の計算
+import itertools
+
+def cumSE(sqe_result_list):
+  if len(sqe_result_list) ==1:
+    sqe_result_list = sum(sqe_result_list)
+  n = len(sqe_result_list)
+
+  cumSE_list = []
+  cum = 0
+  
+  for i in range(n):
+    cum += sqe_result_list[i]
+    cumSE_list.append(cum)
+
+  return cumSE_list
+
+cumSE1 = cumSE(sqe_result1_list)
+cumSE2 = cumSE(sqe_result2_list)
+cumSE3 = cumSE(sqe_result3_list)
+cumSE_rand = cumSE(list_SEBOX_rand)
+
+#ニューラルネット(FFNN, RNN, CNN)による予測
+
+# FFNN
+def FeedForwardNewralNetwork(PERIOD,H):
+  predict_result9_list, sqe_result9_list = [], []
+
+  predict_result = np.zeros((vsample - H) - PERIOD)
+  sqe_result = np.zeros((vsample - H) - PERIOD)
+  for i in range((vsample - H) - PERIOD):
+      # 訓練データの指定
+      train_xx = data_x[i : i + PERIOD]
+      train_y = data_y[H + i : H + i + PERIOD]
+      scaler = StandardScaler()
+      scaler.fit(train_xx)
+      train_x = scaler.transform(train_xx)
+      # テストデータの指定
+      test_xx = data_x[i : i + PERIOD + 1]
+      test_y = data_y[H + i + PERIOD : H + i + PERIOD + 1]
+      scaler.fit(test_xx)
+      test_xx_std = scaler.transform(test_xx)
+      test_x = test_xx_std[PERIOD : PERIOD + 1]
+      # FFNN推定
+      nnet = MLPRegressor(
+          activation="relu", hidden_layer_sizes=(32, 16, 8, 4, 2), solver="adam" #この辺りも色々いじるべき？
+      )
+      nnet.fit(train_x, train_y)
+      forecast = nnet.predict(test_x)
+      predict_result[i] = forecast
+      sqe = (test_y - forecast) ** 2
+      sqe_result[i] = sqe.sum(axis=0)
+
+  predict_result9_list.append(predict_result)
+  sqe_result9_list.append(sqe_result)
+
+  return predict_result9_list, sqe_result9_list
+
+PERIOD = 68  # 訓練データのサンプルサイズ（68四半期）
+H = 1  # 予測期間（1四半期）
+
+predict_result9_list, sqe_result9_list = FeedForwardNewralNetwork(PERIOD,H)
+
+
+# CNN
+def split_sequences(sequences, N_STEP):
+    a_list, b_list = list(), list()
+    for i in range(len(sequences)):
+        end_ia = i + N_STEP
+        if end_ia > len(sequences):
+            break
+        seq_a, seq_b = sequences[i:end_ia, :-1], sequences[end_ia - 1, -1]
+        a_list.append(seq_a)
+        b_list.append(seq_b)
+    return np.array(a_list), np.array(b_list)
+
+
+def ConvolutionalNewralNetwork(PERIOD,H,N_STEP):
+
+  predict_result10_list, sqe_result10_list = [], []
+
+  predict_result = np.zeros((vsample - H) - PERIOD)
+  sqe_result = np.zeros((vsample - H) - PERIOD)
+  for i in range((vsample - H - N_STEP) - PERIOD):
+      # 訓練データの指定
+      train_xx = data_x[i : i + PERIOD]
+      train_y = data_y[H + N_STEP + i : H + N_STEP + i + PERIOD]
+      scaler = StandardScaler()
+      scaler.fit(train_xx)
+      train_x = scaler.transform(train_xx)
+      # テストデータの指定
+      test_xx = data_x[i : i + PERIOD + 1]
+      test_y = data_y[H + N_STEP + i + PERIOD : H + N_STEP + i + PERIOD + 1]
+      scaler.fit(test_xx)
+      test_x = scaler.transform(test_xx)
+      exp1 = train_x
+      dep1 = train_y.values
+      dataset1 = np.append(exp1, dep1, axis=1)
+      a_data, b_data = split_sequences(dataset1, N_STEP)
+      n_features = a_data.shape[2]
+      c_data = np.zeros([1, len(test_x.T)]).reshape(1, len(test_x.T))
+      for j in range(0, N_STEP, 1):
+          c_data = np.append(
+              c_data, test_x[len(test_x) - (1 + j), :].reshape(1, len(test_x.T)), axis=0
+          )
+          c_data_adj = c_data[1:, :]
+      d_data = c_data_adj.reshape((1, N_STEP, n_features))
+      # CNN推定
+      model = Sequential()
+      model.add(
+          Conv1D(
+              filters=8,
+              kernel_size=3,
+              padding="same",
+              activation="relu",
+              kernel_initializer=initializers.TruncatedNormal(),
+              use_bias=True,
+              input_shape=(N_STEP, n_features),
+          )
+      )
+      model.add(MaxPooling1D(pool_size=1)) #元々pool_size=2だと動かなかったが、1にしたら動いた（なぜ？）
+      model.add(
+          Conv1D(
+              filters=8,
+              kernel_size=3,
+              padding="same",
+              activation="relu",
+              kernel_initializer=initializers.TruncatedNormal(),
+              use_bias=True,
+          )
+      )
+      model.add(MaxPooling1D(pool_size=1))    
+      model.add(Flatten())
+      model.add(Dense(6, activation="relu"))
+      model.add(Dropout(rate=0.1))
+      model.add(Dense(1))
+      model.compile(optimizer="adam", loss="mse")
+      model.fit(a_data, b_data, epochs=100)
+      forecast = model.predict(d_data)
+      predict_result[i] = forecast
+      sqe = (test_y - forecast) ** 2
+      sqe_result[i] = sqe.sum(axis=0)
+
+  predict_result10_list.append(predict_result)
+  sqe_result10_list.append(sqe_result)
+
+  return predict_result10_list, sqe_result10_list
+
+PERIOD = 68  # 訓練データのサンプルサイズ（68四半期）
+H = 1  # 予測期間（1四半期）
+N_STEP = 1  # CNNのラグ次数（1四半期）
+
+predict_result10_list, sqe_result10_list = ConvolutionalNewralNetwork(PERIOD,H,N_STEP)
+
+
+# RNN
+def RecurrentNewralNetwork(PERIOD,H,N_STEP):
+
+  predict_result11_list, sqe_result11_list = [], []
+
+  predict_result = np.zeros((vsample - H) - PERIOD)
+  sqe_result = np.zeros((vsample - H) - PERIOD)
+  for i in range(0, (vsample - H - N_STEP) - PERIOD, 1):
+      # 訓練データの指定
+      train_xx = data_x[i : i + PERIOD]
+      train_y = data_y[H + N_STEP + i : H + N_STEP + i + PERIOD]
+      scaler = MinMaxScaler(feature_range=(0, 1))
+      scaler.fit(train_xx)
+      train_x = scaler.transform(train_xx)
+      # テストデータの指定
+      test_xx = data_x[i : i + PERIOD + 1]
+      test_y = data_y[H + N_STEP + i + PERIOD : H + N_STEP + i + PERIOD + 1]
+      scaler.fit(test_xx)
+      test_x = scaler.transform(test_xx)
+      exp1 = train_x
+      dep1 = train_y.values
+      dataset1 = np.append(exp1, dep1, axis=1)
+      a_data, b_data = split_sequences(dataset1, N_STEP)
+      n_features = a_data.shape[2]
+      c_data = np.zeros([1, len(test_x.T)]).reshape(1, len(test_x.T))
+      for j in range(0, N_STEP, 1):
+          c_data = np.append(
+              c_data, test_x[len(test_x) - (1 + j), :].reshape(1, len(test_x.T)), axis=0
+          )
+          c_data_adj = c_data[1:, :]
+      d_data = c_data_adj.reshape((1, N_STEP, n_features))
+      # RNN推定
+      model = Sequential()
+      model.add(LSTM(32, input_shape=(N_STEP, n_features)))
+      model.add(Dense(1, activation="linear"))
+      model.compile(optimizer="adam", loss="mse")
+      model.fit(a_data, b_data, epochs=20)
+      forecast = model.predict(d_data)
+      predict_result[i] = forecast
+      sqe = (test_y - forecast) ** 2
+      sqe_result[i] = sqe.sum(axis=0)
+
+  predict_result11_list.append(predict_result)
+  sqe_result11_list.append(sqe_result)
+
+  return predict_result11_list, sqe_result11_list
+
+PERIOD = 68  # 訓練データのサンプルサイズ（68四半期）
+H = 1 # 予測期間（１四半期）
+N_STEP = 1  # RNNのラグ次数（1四半期）
+
+predict_result11_list, sqe_result11_list = RecurrentNewralNetwork(PERIOD,H,N_STEP)
+
+#####
+# グラフを描画
+fig = plt.figure(figsize=(15, 12))
+ax1 = fig.add_subplot(2, 1, 1)
+ax2 = fig.add_subplot(2, 1, 2)
+ax1.grid()
+ax2.grid()
+ax1.set_title("各モデルのサンプル外予測値", fontsize=24)
+ax1.plot(dti[H + PERIOD :], np.ravel(pd.DataFrame(com_data_q[0.0])[H + PERIOD :]), label="実績値",  color="red")
+ax1.plot(dti[H + PERIOD :], np.ravel(predict_result9_list), label="FFNN", color="green")
+ax1.plot(dti[H + PERIOD :], np.ravel(predict_result10_list), label="CNN", color="purple")
+ax1.plot(dti[H + PERIOD :], np.ravel(predict_result11_list), label="RNN", color="orange")
+#ax1.plot(dti[H + PERIOD :], np.ravel(predict_result1_list), label="AR(1):固定ウィンドウ", color="blue")
+#ax1.plot(dti[H + PERIOD :], data_y[H + PERIOD - 1:-1].to_numpy(), label="ランダムウォーク", color="grey")
+
+ax1.legend(loc="lower right", fontsize=16)
+ax1.tick_params(labelsize=16)
+ax1.set_ylim(-10, 8)
+ax1.set_ylabel("％", fontsize=16)
+
+ax2.set_title("累積2乗予測誤差", fontsize=24)
+ax2.plot(dti[H + PERIOD :], np.ravel(sqe_result9_list).cumsum(), label="FFNN", color="green")
+ax2.plot(dti[H + PERIOD :], np.ravel(sqe_result10_list).cumsum(), label="CNN", color="purple")
+ax2.plot(dti[H + PERIOD :], np.ravel(sqe_result11_list).cumsum(), label="RNN", color='orange')
+ax2.plot(dti[H + PERIOD :], np.ravel(sqe_result1_list).cumsum(), label="AR(1):固定ウィンドウ", color="blue")
+ax2.plot(dti[H + PERIOD :], np.ravel(cumSE_rand), label="ランダムウォーク", color="grey")
+ax2.legend(loc="upper left", fontsize=16)
+ax2.tick_params(labelsize=16)
+
+MSFE = [] 
+index = ['FFNN','CNN','RNN','AR(1):固定ウィンドウ', 'ランダムウォーク']
+MSFE.append(np.ravel(sqe_result9_list).mean())
+MSFE.append(np.ravel(sqe_result10_list).mean())
+MSFE.append(np.ravel(sqe_result11_list).mean())
+MSFE.append(np.ravel(sqe_result1_list).mean())
+MSFE.append(np.ravel(list_SEBOX_rand).mean())
+pd.DataFrame(MSFE,index = index, columns = ['MSFE'])
